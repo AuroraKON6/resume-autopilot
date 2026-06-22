@@ -193,6 +193,11 @@ public class DeepseekConfigRefreshService {
         return apiKey.substring(0, 4) + "****" + apiKey.substring(apiKey.length() - 4);
     }
 
+    public boolean hasCurrentApiKey() {
+        String apiKey = environment.getProperty("spring.ai.deepseek.api-key");
+        return apiKey != null && !apiKey.isBlank();
+    }
+
     /**
      * 验证配置刷新是否生效
      */

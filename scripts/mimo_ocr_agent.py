@@ -17,13 +17,17 @@ import os
 import re
 import sys
 import time
-import urllib.error
-import urllib.request
 import webbrowser
 from datetime import datetime
 from pathlib import Path
 
 import pyautogui
+import requests
+
+try:
+    import certifi
+except Exception:
+    certifi = None
 
 
 pyautogui.FAILSAFE = True
@@ -39,6 +43,23 @@ PLATFORM_URLS = {
     "liepin": "https://www.liepin.com/zhaopin/?key={keyword}",
 }
 
+PLATFORM_WINDOW_KEYWORDS = {
+    "boss": ["boss", "zhipin", "BOSS直聘"],
+    "51job": ["51job", "前程无忧"],
+    "zhilian": ["zhaopin", "智联"],
+    "liepin": ["liepin", "猎聘"],
+}
+
+BROWSER_WINDOW_KEYWORDS = [
+    "chrome",
+    "edge",
+    "firefox",
+    "browser",
+    "浏览器",
+    "google chrome",
+    "microsoft edge",
+]
+
 BLOCKING_KEYWORDS = [
     "captcha",
     "verification",
@@ -51,7 +72,10 @@ BLOCKING_KEYWORDS = [
     "验证码",
     "短信验证码",
     "手机验证码",
-    "扫码",
+    "扫码登录",
+    "扫码登陆",
+    "二维码登录",
+    "微信扫码登录",
     "登录",
     "异常访问",
 ]
@@ -86,7 +110,7 @@ SUCCESS_KEYWORDS = [
 def load_dotenv(path):
     if not path.exists():
         return
-    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+    for raw_line in path.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -102,6 +126,26 @@ def env_first(*names, default=""):
         if value:
             return value
     return default
+
+
+def build_proxy_map():
+    proxy = env_first("VISION_PROXY", "MIMO_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY")
+    if not proxy:
+        proxy_host = env_first("PROXY_HOST")
+        proxy_port = env_first("PROXY_PORT")
+        if proxy_host and proxy_port:
+            proxy = "http://{}:{}".format(proxy_host, proxy_port)
+    if not proxy:
+        return None
+    return {"http": proxy, "https": proxy}
+
+
+def masked(value):
+    if not value:
+        return ""
+    if len(value) <= 12:
+        return value[:2] + "***"
+    return value[:8] + "***" + value[-4:]
 
 
 def emit_final(result, exit_code=0):
@@ -143,7 +187,11 @@ def get_ocr_reader():
 
 
 def run_ocr(reader, image_path):
-    raw_results = reader.readtext(str(image_path))
+    import numpy as np
+    from PIL import Image
+
+    image = np.array(Image.open(image_path).convert("RGB"))
+    raw_results = reader.readtext(image)
     elements = []
     for bbox, text, confidence in raw_results:
         if confidence < 0.25:
@@ -237,11 +285,16 @@ def build_prompt(args, elements, step, delivered):
 
 
 def call_mimo(prompt, image):
-    api_key = env_first("MIMO_API_KEY", "OPENAI_API_KEY")
-    base_url = env_first("MIMO_BASE_URL", "OPENAI_BASE_URL", default="https://token-plan-sgp.xiaomimimo.com/v1")
-    model = env_first("MIMO_MODEL", default="mimo-v2.5")
+    api_key = env_first("VISION_API_KEY", "MIMO_API_KEY", "OPENAI_API_KEY")
+    base_url = env_first(
+        "VISION_BASE_URL",
+        "MIMO_BASE_URL",
+        "OPENAI_BASE_URL",
+        default="https://token-plan-sgp.xiaomimimo.com/v1",
+    )
+    model = env_first("VISION_MODEL", "MIMO_MODEL", default="mimo-v2.5")
     if not api_key:
-        raise RuntimeError("Missing MIMO_API_KEY or OPENAI_API_KEY")
+        raise RuntimeError("Missing VISION_API_KEY, MIMO_API_KEY, or OPENAI_API_KEY")
 
     endpoint = base_url.rstrip("/") + "/chat/completions"
     body = {
@@ -255,25 +308,40 @@ def call_mimo(prompt, image):
                 ],
             }
         ],
-        "max_tokens": 500,
+        "max_tokens": 2000,
         "temperature": 0.1,
     }
-    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(
-        endpoint,
-        data=data,
-        headers={
+    proxy_map = build_proxy_map()
+    request_kwargs = {
+        "headers": {
             "Authorization": "Bearer " + api_key,
             "Content-Type": "application/json",
         },
-        method="POST",
-    )
+        "json": body,
+        "timeout": 45,
+    }
+    if proxy_map:
+        request_kwargs["proxies"] = proxy_map
+    if certifi:
+        request_kwargs["verify"] = certifi.where()
+
     try:
-        with urllib.request.urlopen(request, timeout=45) as response:
-            raw = response.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError("Mimo HTTP error {}: {}".format(exc.code, detail[:500]))
+        response = requests.post(endpoint, **request_kwargs)
+        raw = response.text
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = exc.response.text if exc.response is not None else str(exc)
+        status_code = exc.response.status_code if exc.response is not None else "unknown"
+        raise RuntimeError("Vision model HTTP error {}: {}".format(status_code, detail[:500]))
+    except requests.RequestException as exc:
+        proxy = proxy_map.get("https") if proxy_map else ""
+        raise RuntimeError(
+            "Vision model request failed: {}; endpoint={}; proxy={}".format(
+                exc,
+                endpoint,
+                masked(proxy),
+            )
+        )
 
     parsed = json.loads(raw)
     message = parsed["choices"][0].get("message", {})
@@ -281,7 +349,11 @@ def call_mimo(prompt, image):
 
 
 def parse_decision(raw):
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    # Find first complete JSON object (non-greedy)
+    match = re.search(r"\{[^{}]*\}", raw)
+    if not match:
+        # Try nested JSON (one level)
+        match = re.search(r"\{.*?\}", raw, re.DOTALL)
     if not match:
         raise ValueError("Mimo did not return a JSON object: " + raw[:300])
     decision = json.loads(match.group(0))
@@ -342,6 +414,80 @@ def execute_decision(decision, args):
     return "executed"
 
 
+def normalize_text(value):
+    return str(value or "").lower()
+
+
+def window_title(window):
+    try:
+        return str(getattr(window, "title", "") or "")
+    except Exception:
+        return ""
+
+
+def all_desktop_windows():
+    try:
+        return [window for window in pyautogui.getAllWindows() if window_title(window).strip()]
+    except Exception:
+        return []
+
+
+def title_matches(title, keywords):
+    lowered = normalize_text(title)
+    return any(normalize_text(keyword) in lowered for keyword in keywords)
+
+
+def activate_window(window):
+    try:
+        if getattr(window, "isMinimized", False):
+            window.restore()
+        window.activate()
+        time.sleep(0.8)
+        return True
+    except Exception:
+        try:
+            window.maximize()
+            window.activate()
+            time.sleep(0.8)
+            return True
+        except Exception:
+            pass
+
+    try:
+        left = int(getattr(window, "left", 0) or 0)
+        top = int(getattr(window, "top", 0) or 0)
+        width = int(getattr(window, "width", 0) or 0)
+        if width > 0:
+            pyautogui.click(left + min(120, max(20, width // 3)), top + 16)
+            time.sleep(0.8)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def focus_platform_window(platform, allow_browser_fallback=False):
+    windows = all_desktop_windows()
+    platform_keywords = PLATFORM_WINDOW_KEYWORDS.get(platform, [])
+    matched_title = ""
+    for window in windows:
+        title = window_title(window)
+        if title_matches(title, platform_keywords):
+            matched_title = title
+            if activate_window(window):
+                return True, title
+
+    if allow_browser_fallback:
+        for window in windows:
+            title = window_title(window)
+            if title_matches(title, BROWSER_WINDOW_KEYWORDS):
+                matched_title = title
+                if activate_window(window):
+                    return True, title
+
+    return False, matched_title
+
+
 def open_platform(args):
     if args.no_open:
         return
@@ -350,6 +496,7 @@ def open_platform(args):
         return
     webbrowser.open(url_template.format(keyword=args.keyword))
     time.sleep(args.initial_delay)
+    focus_platform_window(args.platform, allow_browser_fallback=True)
 
 
 def run_agent(args):
@@ -376,6 +523,19 @@ def run_agent(args):
         for job_index in range(args.count):
             job_delivered = False
             for step in range(args.max_steps):
+                focused, focused_title = focus_platform_window(args.platform)
+                if not focused:
+                    result["needsUserAction"] = True
+                    result["events"].append(
+                        {
+                            "job": job_index + 1,
+                            "step": step + 1,
+                            "action": "need_user",
+                            "reason": "target_browser_not_focused",
+                            "expect": "Open or focus the target job-search browser tab, then retry.",
+                        }
+                    )
+                    break
                 image, image_path = capture_screen()
                 elements = run_ocr(reader, image_path)
                 visible_text = screen_text(elements)
@@ -412,6 +572,7 @@ def run_agent(args):
                     "x": decision.get("x"),
                     "y": decision.get("y"),
                     "reason": decision.get("reason"),
+                    "windowTitle": focused_title,
                     "screenshot": str(image_path),
                     "visibleTextSample": visible_text[:300],
                 }

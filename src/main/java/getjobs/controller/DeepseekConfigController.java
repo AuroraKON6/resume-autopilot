@@ -40,6 +40,7 @@ public class DeepseekConfigController {
         String error = deepseekConfigRefreshService.updateApiKeyWithValidation(request.getApiKey().trim());
         Map<String, Object> response = createResponse(error == null, error == null ? "更新成功" : error);
         response.put("apiKey", deepseekConfigRefreshService.getCurrentApiKey());
+        response.put("configured", deepseekConfigRefreshService.hasCurrentApiKey());
         return ResponseEntity.ok(response);
     }
 
@@ -52,6 +53,7 @@ public class DeepseekConfigController {
     public ResponseEntity<Map<String, Object>> getCurrentApiKey() {
         Map<String, Object> response = new HashMap<>();
         response.put("apiKey", deepseekConfigRefreshService.getCurrentApiKey());
+        response.put("configured", deepseekConfigRefreshService.hasCurrentApiKey());
         return ResponseEntity.ok(response);
     }
 

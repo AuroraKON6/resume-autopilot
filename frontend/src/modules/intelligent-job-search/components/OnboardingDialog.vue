@@ -70,7 +70,7 @@
         </v-card-text>
 
         <v-card-actions class="onboarding-footer">
-          <v-btn variant="text" :disabled="!apiKeySaved" @click="skip">跳过</v-btn>
+          <v-btn variant="text" @click="skip">跳过</v-btn>
           <v-spacer />
           <v-btn
             color="primary"
@@ -171,10 +171,21 @@ const apiKeySaving = ref(false);
 const apiKeyError = ref('');
 const apiKeySaved = ref(false);
 
+type ApiKeyStatusResponse = {
+  apiKey?: string;
+  configured?: boolean;
+};
+
+function isApiKeyConfigured(res: ApiKeyStatusResponse) {
+  if (res.configured === true) return true;
+  const apiKey = (res.apiKey || '').trim();
+  return apiKey.length > 0 && apiKey !== '未配置';
+}
+
 async function checkApiKey() {
   try {
-    const res = await httpJson<{ apiKey: string }>('/api/deepseek/api-key', { method: 'GET' });
-    if (res.apiKey && res.apiKey !== '未配置') apiKeySaved.value = true;
+    const res = await httpJson<ApiKeyStatusResponse>('/api/deepseek/api-key', { method: 'GET' });
+    apiKeySaved.value = isApiKeyConfigured(res);
   } catch {
     // 忽略，保持未配置状态
   }
@@ -188,7 +199,7 @@ async function saveApiKey() {
   apiKeySaving.value = true;
   apiKeyError.value = '';
   try {
-    const res = await httpJson<{ success: boolean; message: string }>('/api/deepseek/api-key', {
+    const res = await httpJson<{ success: boolean; message: string; configured?: boolean }>('/api/deepseek/api-key', {
       method: 'POST',
       body: JSON.stringify({ apiKey: apiKeyInput.value.trim() }),
     });

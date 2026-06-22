@@ -261,6 +261,73 @@
 
               <div class="divider-line" />
 
+              <div class="info-tip mb-4">
+                <v-icon size="18" class="tip-icon">mdi-eye-circle-outline</v-icon>
+                <span>OCR 投递需要多模态模型接口。填写 OpenAI-compatible Vision API 后，系统会把截图和 OCR 文字交给模型判断下一步动作。</span>
+              </div>
+
+              <v-text-field
+                v-model="state.form.visionBaseUrl"
+                label="多模态 Base URL"
+                placeholder="https://example.com/v1"
+                variant="outlined"
+                density="comfortable"
+                class="modern-input"
+              >
+                <template #prepend-inner>
+                  <v-icon color="primary">mdi-web</v-icon>
+                </template>
+              </v-text-field>
+
+              <v-text-field
+                v-model="state.form.visionModel"
+                label="多模态模型"
+                placeholder="mimo-v2.5 / gpt-4o / qwen-vl-plus"
+                variant="outlined"
+                density="comfortable"
+                class="modern-input"
+              >
+                <template #prepend-inner>
+                  <v-icon color="primary">mdi-image-search-outline</v-icon>
+                </template>
+              </v-text-field>
+
+              <v-text-field
+                v-model="state.form.visionApiKey"
+                :type="state.showVisionSecret ? 'text' : 'password'"
+                label="多模态 API Key"
+                variant="outlined"
+                density="comfortable"
+                class="modern-input"
+              >
+                <template #prepend-inner>
+                  <v-icon color="warning">mdi-key-chain</v-icon>
+                </template>
+                <template #append-inner>
+                  <v-btn
+                    :icon="state.showVisionSecret ? 'mdi-eye-off-outline' : 'mdi-eye-outline'"
+                    variant="text"
+                    size="small"
+                    @click="state.showVisionSecret = !state.showVisionSecret"
+                  />
+                </template>
+              </v-text-field>
+
+              <v-text-field
+                v-model="state.form.visionProxy"
+                label="多模态代理"
+                placeholder="可选，如 http://127.0.0.1:7890"
+                variant="outlined"
+                density="comfortable"
+                class="modern-input"
+              >
+                <template #prepend-inner>
+                  <v-icon color="info">mdi-lan-connect</v-icon>
+                </template>
+              </v-text-field>
+
+              <div class="divider-line" />
+
               <div class="switch-group">
                 <div class="switch-item">
                   <div class="switch-info">
@@ -918,4 +985,3 @@ const onOnboardingDone = (data: {
   animation-delay: 0.2s;
 }
 </style>
-
