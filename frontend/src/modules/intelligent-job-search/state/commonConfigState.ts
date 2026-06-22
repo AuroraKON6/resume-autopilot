@@ -16,6 +16,10 @@ export interface FormModel {
   maxSalary: string;
   aiPlatform: string;
   aiPlatformKey: string;
+  visionBaseUrl: string;
+  visionApiKey: string;
+  visionModel: string;
+  visionProxy: string;
   enableAIJobMatch: boolean;
   enableAIGreeting: boolean;
   sendImgResume: boolean;
@@ -28,6 +32,7 @@ export const useCommonConfigState = () => {
     loading: false,
     saving: false,
     showSecret: false,
+    showVisionSecret: false,
     aiPlatforms: [{ label: 'Deepseek', value: 'deepseek' }] as AiPlatformOption[],
     aiConfigsCache: {} as Record<string, string>,
     aiGreetingMessage: '',
@@ -46,6 +51,10 @@ export const useCommonConfigState = () => {
       maxSalary: '',
       aiPlatform: 'deepseek',
       aiPlatformKey: '',
+      visionBaseUrl: '',
+      visionApiKey: '',
+      visionModel: 'mimo-v2.5',
+      visionProxy: '',
       enableAIJobMatch: false,
       enableAIGreeting: false,
       sendImgResume: false,
@@ -70,4 +79,3 @@ export const useCommonConfigState = () => {
 
   return state;
 };
-

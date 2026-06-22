@@ -1,5 +1,7 @@
 package getjobs.infrastructure.ai.config;
 
+import getjobs.infrastructure.webclient.ProxyProperties;
+import getjobs.infrastructure.webclient.WebClientProperties;
 import io.netty.handler.logging.LogLevel;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.Logger;
@@ -12,18 +14,23 @@ import org.springframework.http.HttpRequest;
 import org.springframework.http.client.ClientHttpRequestExecution;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.client.ClientHttpResponse;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.netty.http.client.HttpClient;
+import reactor.netty.transport.ProxyProvider;
 import reactor.netty.transport.logging.AdvancedByteBufFormat;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 
 /**
  * Deepseek API 专用 HTTP 客户端配置。
@@ -44,6 +51,14 @@ public class DeepseekApiHttpClientConfig {
 
     private static final Logger HTTP_LOG = LoggerFactory.getLogger(DEEPSEEK_HTTP_LOGGER);
 
+    private final ProxyProperties proxyProperties;
+    private final WebClientProperties webClientProperties;
+
+    public DeepseekApiHttpClientConfig(ProxyProperties proxyProperties, WebClientProperties webClientProperties) {
+        this.proxyProperties = proxyProperties;
+        this.webClientProperties = webClientProperties;
+    }
+
     /**
      * 供 Deepseek OpenAiApi 使用的 WebClient.Builder。
      * 当前包含 wiretap 便于 debug；后续可在此统一增加代理、超时等。
@@ -53,7 +68,7 @@ public class DeepseekApiHttpClientConfig {
         // wiretap：将请求/响应数据复制到指定 logger
         // - LogLevel.DEBUG：wiretap 的触发级别，需在 yml 中设置 logging.level.DeepseekApiHttp=DEBUG 才会实际输出
         // - AdvancedByteBufFormat.TEXTUAL：内容以可读文本格式输出（而非十六进制），便于查看 JSON 请求体/响应体
-        HttpClient httpClient = HttpClient.create()
+        HttpClient httpClient = createReactorHttpClient()
                 .wiretap(DEEPSEEK_HTTP_LOGGER, LogLevel.DEBUG, AdvancedByteBufFormat.TEXTUAL);
         WebClient.Builder builder = WebClient.builder()
                 .clientConnector(new ReactorClientHttpConnector(httpClient));
@@ -69,9 +84,56 @@ public class DeepseekApiHttpClientConfig {
     @Bean(name = "deepseekApiRestClientBuilder")
     public RestClient.Builder deepseekApiRestClientBuilder() {
         RestClient.Builder builder = RestClient.builder()
+                .requestFactory(createRequestFactory())
                 .requestInterceptor(new DeepseekHttpLoggingInterceptor());
         log.debug("Deepseek API RestClient.Builder 已创建（含日志拦截器，logger={}）", DEEPSEEK_HTTP_LOGGER);
         return builder;
+    }
+
+    private HttpClient createReactorHttpClient() {
+        HttpClient httpClient = HttpClient.create();
+
+        if (proxyProperties.isConfigured()) {
+            log.info("Deepseek API WebClient 使用代理: {}:{}", proxyProperties.getHost(), proxyProperties.getPort());
+            httpClient = httpClient.proxy(proxy -> proxy
+                    .type(ProxyProvider.Proxy.HTTP)
+                    .host(proxyProperties.getHost())
+                    .port(proxyProperties.getPort()));
+        }
+
+        httpClient = httpClient
+                .responseTimeout(Duration.ofMillis(webClientProperties.getResponseTimeout()))
+                .option(io.netty.channel.ChannelOption.CONNECT_TIMEOUT_MILLIS, webClientProperties.getConnectTimeout())
+                .option(io.netty.channel.ChannelOption.SO_KEEPALIVE, true)
+                .doOnConnected(conn -> {
+                    conn.addHandlerLast(
+                            new io.netty.handler.timeout.ReadTimeoutHandler(webClientProperties.getReadTimeout()));
+                    conn.addHandlerLast(
+                            new io.netty.handler.timeout.WriteTimeoutHandler(webClientProperties.getWriteTimeout()));
+                });
+
+        if (webClientProperties.isFollowRedirect()) {
+            httpClient = httpClient.followRedirect(true);
+        }
+        if (webClientProperties.isCompress()) {
+            httpClient = httpClient.compress(true);
+        }
+
+        return httpClient;
+    }
+
+    private SimpleClientHttpRequestFactory createRequestFactory() {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(webClientProperties.getConnectTimeout());
+        factory.setReadTimeout((int) Duration.ofSeconds(webClientProperties.getReadTimeout()).toMillis());
+
+        if (proxyProperties.isConfigured()) {
+            log.info("Deepseek API RestClient 使用代理: {}:{}", proxyProperties.getHost(), proxyProperties.getPort());
+            factory.setProxy(new Proxy(Proxy.Type.HTTP,
+                    new InetSocketAddress(proxyProperties.getHost(), proxyProperties.getPort())));
+        }
+
+        return factory;
     }
 
     /**

@@ -77,6 +77,14 @@ const normalizeAiPlatforms = (platforms?: Array<AiPlatformOption | string> | unk
     .filter((item): item is AiPlatformOption => item !== null);
 };
 
+const getConfigValue = (configs: Record<string, string>, ...keys: string[]) => {
+  for (const key of keys) {
+    const value = configs[key];
+    if (typeof value === 'string' && value.trim()) return value;
+  }
+  return '';
+};
+
 export const useCommonConfigService = (state: CommonConfigState, snackbar: SnackbarStore) => {
   const snapshotForm = () => {
     state.initialSnapshot = JSON.parse(JSON.stringify(state.form));
@@ -148,6 +156,10 @@ export const useCommonConfigService = (state: CommonConfigState, snackbar: Snack
         minSalary: config.minSalary != null ? String(config.minSalary) : '',
         maxSalary: config.maxSalary != null ? String(config.maxSalary) : '',
         aiPlatformKey: state.aiConfigsCache[resolvedPlatform] ?? '',
+        visionBaseUrl: getConfigValue(state.aiConfigsCache, 'vision.baseUrl', 'mimo.baseUrl', 'openai.baseUrl'),
+        visionApiKey: getConfigValue(state.aiConfigsCache, 'vision.apiKey', 'mimo.apiKey', 'openai.apiKey'),
+        visionModel: getConfigValue(state.aiConfigsCache, 'vision.model', 'mimo.model') || 'mimo-v2.5',
+        visionProxy: getConfigValue(state.aiConfigsCache, 'vision.proxy', 'mimo.proxy'),
         enableAIJobMatch:
           (config.enableAIJobMatchDetection as boolean | undefined) ??
           config.enableAIJobMatch ??
@@ -184,6 +196,10 @@ export const useCommonConfigService = (state: CommonConfigState, snackbar: Snack
     if (state.form.aiPlatformKey) {
       aiConfig[state.form.aiPlatform] = state.form.aiPlatformKey;
     }
+    aiConfig['vision.baseUrl'] = state.form.visionBaseUrl.trim();
+    aiConfig['vision.apiKey'] = state.form.visionApiKey.trim();
+    aiConfig['vision.model'] = state.form.visionModel.trim();
+    aiConfig['vision.proxy'] = state.form.visionProxy.trim();
 
     return {
       jobBlacklistKeywords: toStringValue(state.form.jobBlacklist),
@@ -252,4 +268,3 @@ export const useCommonConfigService = (state: CommonConfigState, snackbar: Snack
     copyAIGreeting,
   };
 };
-

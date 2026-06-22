@@ -4,6 +4,8 @@ import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import getjobs.repository.UserProfileRepository;
+import getjobs.repository.entity.UserProfile;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -13,11 +15,18 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Service
 public class PythonExecutionService {
+
+    private final UserProfileRepository userProfileRepository;
+
+    public PythonExecutionService(UserProfileRepository userProfileRepository) {
+        this.userProfileRepository = userProfileRepository;
+    }
 
     @Value("${python.executable:${PYTHON_EXECUTABLE:}}")
     private String pythonExecutable;
@@ -53,6 +62,7 @@ public class PythonExecutionService {
         processBuilder.directory(new File(System.getProperty("user.dir")));
         processBuilder.environment().put("PYTHONIOENCODING", "utf-8");
         processBuilder.environment().put("PYTHONUTF8", "1");
+        applyVisionModelEnvironment(processBuilder.environment());
 
         try {
             Process process = processBuilder.start();
@@ -164,8 +174,46 @@ public class PythonExecutionService {
         return "python";
     }
 
+    private void applyVisionModelEnvironment(Map<String, String> environment) {
+        Map<String, String> aiConfigs = userProfileRepository.findAll().stream()
+                .findFirst()
+                .map(UserProfile::getAiPlatformConfigs)
+                .orElse(null);
+        if (aiConfigs == null || aiConfigs.isEmpty()) {
+            return;
+        }
+
+        putEnvAlias(environment, firstNonBlank(aiConfigs,
+                "vision.apiKey", "mimo.apiKey", "openai.apiKey"), "VISION_API_KEY", "MIMO_API_KEY", "OPENAI_API_KEY");
+        putEnvAlias(environment, firstNonBlank(aiConfigs,
+                "vision.baseUrl", "mimo.baseUrl", "openai.baseUrl"), "VISION_BASE_URL", "MIMO_BASE_URL", "OPENAI_BASE_URL");
+        putEnvAlias(environment, firstNonBlank(aiConfigs,
+                "vision.model", "mimo.model"), "VISION_MODEL", "MIMO_MODEL");
+        putEnvAlias(environment, firstNonBlank(aiConfigs,
+                "vision.proxy", "mimo.proxy"), "VISION_PROXY", "MIMO_PROXY");
+    }
+
+    private String firstNonBlank(Map<String, String> values, String... keys) {
+        for (String key : keys) {
+            String value = values.get(key);
+            if (value != null && !value.isBlank()) {
+                return value.trim();
+            }
+        }
+        return null;
+    }
+
+    private void putEnvAlias(Map<String, String> environment, String value, String... names) {
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        for (String name : names) {
+            environment.put(name, value);
+        }
+    }
+
     public boolean checkDependencies() {
-        String[] requiredPackages = {"pyautogui", "PIL", "easyocr"};
+        String[] requiredPackages = {"pyautogui", "PIL", "easyocr", "requests"};
 
         for (String pkg : requiredPackages) {
             try {
