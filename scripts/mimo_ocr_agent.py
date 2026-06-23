@@ -14,6 +14,7 @@ import base64
 import io
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -103,8 +104,22 @@ SUCCESS_KEYWORDS = [
     "申请成功",
     "已发送",
     "沟通成功",
+    "已沟通",
+    "已向BOSS发送消息",
+    "已向 Boss 发送消息",
+    "向BOSS发送消息",
     "简历已投",
 ]
+
+BOSS_SUCCESS_DIALOG_KEYWORDS = [
+    "已向BOSS发送消息",
+    "已向 Boss 发送消息",
+    "向BOSS发送消息",
+    "发送消息",
+]
+
+BOSS_STAY_BUTTON_KEYWORDS = ["留在此页", "留在"]
+BOSS_CONTINUE_CHAT_KEYWORDS = ["继续沟通"]
 
 
 def load_dotenv(path):
@@ -226,6 +241,53 @@ def success_detected(elements):
     return contains_any(screen_text(elements), SUCCESS_KEYWORDS)
 
 
+def boss_success_dialog_detected(elements):
+    text = screen_text(elements)
+    has_sent = contains_any(text, BOSS_SUCCESS_DIALOG_KEYWORDS)
+    has_dialog_actions = contains_any(text, BOSS_STAY_BUTTON_KEYWORDS + BOSS_CONTINUE_CHAT_KEYWORDS)
+    return has_sent and (has_dialog_actions or "Boss您好" in text or "BOSS您好" in text)
+
+
+def find_ocr_point(elements, keywords):
+    for element in elements:
+        text = str(element.get("text", ""))
+        if any(keyword.lower() in text.lower() for keyword in keywords):
+            x = element.get("x")
+            y = element.get("y")
+            if x is not None and y is not None:
+                return int(x), int(y), text
+    return None
+
+
+def dismiss_boss_success_dialog(elements, args):
+    if args.dry_run:
+        return "dry_run"
+    target = find_ocr_point(elements, BOSS_STAY_BUTTON_KEYWORDS)
+    if target:
+        x, y, text = target
+        pyautogui.click(x, y)
+        time.sleep(args.action_delay)
+        return "clicked_" + text
+    continue_target = find_ocr_point(elements, BOSS_CONTINUE_CHAT_KEYWORDS)
+    if continue_target:
+        x, y, text = continue_target
+        width, _height = pyautogui.size()
+        offset = min(max(int(width * 0.055), 80), 150)
+        pyautogui.click(max(1, x - offset), y)
+        time.sleep(args.action_delay)
+        return "clicked_left_of_" + text
+    pyautogui.press("esc")
+    time.sleep(args.action_delay)
+    return "pressed_esc_no_stay_button"
+
+
+def boss_continue_chat_decision(decision, args):
+    if args.platform != "boss":
+        return False
+    joined = " ".join(str(decision.get(name, "") or "") for name in ("text", "target_text", "reason", "expect", "value"))
+    return contains_any(joined, BOSS_CONTINUE_CHAT_KEYWORDS)
+
+
 def likely_final_submit(decision):
     joined = " ".join(
         str(decision.get(name, ""))
@@ -260,9 +322,11 @@ def build_prompt(args, elements, step, delivered):
         ],
         "rules": [
             "Return one JSON object only. No markdown.",
+            "The action field is required. Never return null, None, empty string, or an unsupported action; use wait or need_user if unsure.",
             "Use actual screen coordinates from OCR elements when clicking.",
             "If captcha, slider, SMS code, QR login, login page, or security check is visible, choose need_user.",
             "If final application submit/apply/send-resume is needed, set is_final_submit=true.",
+            "On BOSS, if a dialog says 已向BOSS发送消息 and shows 留在此页 / 继续沟通, the job is already delivered. Click 留在此页 only. Never click 继续沟通.",
             "Do not invent success. Use done only when the current job is already applied or the objective is complete.",
         ],
         "json_schema": {
@@ -357,9 +421,27 @@ def parse_decision(raw):
     if not match:
         raise ValueError("Mimo did not return a JSON object: " + raw[:300])
     decision = json.loads(match.group(0))
-    action = str(decision.get("action", "")).lower().strip()
-    if action not in {"click", "scroll", "type", "press", "hotkey", "wait", "done", "need_user"}:
-        raise ValueError("Unsupported action: " + str(decision.get("action")))
+    original_action = decision.get("action")
+    action = str(original_action or "").lower().strip()
+    action_aliases = {
+        "tap": "click",
+        "select": "click",
+        "noop": "wait",
+        "no_op": "wait",
+        "none": "wait",
+        "null": "wait",
+        "": "wait",
+        "back": "hotkey",
+    }
+    action = action_aliases.get(action, action)
+    if action == "hotkey" and str(original_action or "").lower().strip() == "back" and not decision.get("value"):
+        decision["value"] = ["alt", "left"]
+    allowed = {"click", "scroll", "type", "press", "hotkey", "wait", "done", "need_user"}
+    if action not in allowed:
+        decision.setdefault("reason", "unsupported vision action: " + str(original_action))
+        action = "need_user"
+    if action == "wait" and (original_action is None or str(original_action).lower().strip() in {"", "none", "null", "noop", "no_op"}):
+        decision.setdefault("reason", "vision model omitted action; waiting for a fresh screenshot")
     decision["action"] = action
     return decision
 
@@ -368,6 +450,9 @@ def execute_decision(decision, args):
     action = decision["action"]
     if action in {"done", "need_user"}:
         return action
+
+    if boss_continue_chat_decision(decision, args):
+        return "blocked_boss_continue_chat"
 
     if decision.get("is_final_submit") or likely_final_submit(decision):
         if not args.auto_submit:
@@ -544,6 +629,23 @@ def run_agent(args):
                     result["needsUserAction"] = True
                     result["events"].append(
                         {"job": job_index + 1, "step": step + 1, "action": "need_user", "reason": "blocked_state"}
+                    )
+                    break
+
+                if args.platform == "boss" and (
+                    boss_success_dialog_detected(elements)
+                    or contains_any(visible_text, BOSS_SUCCESS_DIALOG_KEYWORDS)
+                ):
+                    result["delivered"] += 1
+                    job_delivered = True
+                    dismiss_outcome = dismiss_boss_success_dialog(elements, args)
+                    result["events"].append(
+                        {
+                            "job": job_index + 1,
+                            "step": step + 1,
+                            "action": "boss_success_dialog_detected",
+                            "outcome": dismiss_outcome,
+                        }
                     )
                     break
 
